@@ -1,0 +1,35 @@
+# ---------------------------------------------
+# systemd-юнит для freelance-lead-parser.
+# Перед установкой ЗАПОЛНИТЬ под свой сервер: User, WorkingDirectory,
+# путь к python в venv (ExecStart). Затем:
+#   sudo cp deploy/freelance-lead-parser.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now freelance-lead-parser
+#   sudo journalctl -u freelance-lead-parser -f
+# ---------------------------------------------
+
+[Unit]
+Description=freelance-lead-parser — Telegram-парсер фриланс-заказов
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# --- ЗАПОЛНИТЬ под сервер ---
+User=CHANGE_ME
+WorkingDirectory=/opt/freelance-lead-parser
+ExecStart=/opt/freelance-lead-parser/.venv/bin/python -u main.py
+# .env читается python-dotenv из WorkingDirectory (отдельный EnvironmentFile не нужен)
+
+# перезапуск после сбоя; auth-ошибка (отозванная сессия) даёт выход с кодом !=0,
+# systemd покажет failed, а не будет крутить молча
+Restart=always
+RestartSec=5
+
+# логи -> journald (смотреть: journalctl -u freelance-lead-parser -f)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
