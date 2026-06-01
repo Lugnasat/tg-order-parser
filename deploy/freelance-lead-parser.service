@@ -9,7 +9,7 @@
 # ---------------------------------------------
 
 [Unit]
-Description=freelance-lead-parser — Telegram-парсер фриланс-заказов
+Description=freelance-lead-parser — Telegram-парсер заказов
 After=network-online.target
 Wants=network-online.target
 
