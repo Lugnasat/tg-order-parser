@@ -1,11 +1,17 @@
 # ---------------------------------------------
-# DB — дедуп на голом sqlite3 (одна таблица seen)
-# Семантика перенесена из образца (services/lead_service.py): два уровня
-# дедупа. Правки относительно образца:
-#   - П2: голый sqlite3 НЕ превращает (author_id = None) в IS NULL сам,
-#     поэтому NULL-автора (пост «от имени канала», Г6) обрабатываем явно;
+# DB — дедуп на голом sqlite3 (одна таблица seen). Два уровня:
+#   - уровень 1 (точный): тот же (chat_id, message_id) — повтор сообщения;
+#   - уровень 2 (cross-chat): тот же канонический fingerprint за окно
+#     CROSS_CHAT_WINDOW_SECONDS — один заказ из разных каналов.
+# Правки относительно образца:
+#   - v2 (2026-06-04): cross-chat дедуп БЕЗ author_id. v1 требовал
+#     совпадения автора, но один заказ постят РАЗНЫЕ боты-агрегаторы в
+#     разные каналы → авторы не совпадают → дубли текли (спека v2 §1.2).
+#     Канонический fingerprint (fingerprint.py) одинаков для заказа из
+#     любого канала, автор не нужен. Колонка author_id остаётся (пишется
+#     в mark_seen) для возможной диагностики.
 #   - П11: created_at храним как unix-epoch int в UTC, не строкой —
-#     сравнение окна «30 минут» на числах надёжнее, чем на ISO-строках.
+#     сравнение окна на числах надёжнее, чем на ISO-строках.
 # ---------------------------------------------
 
 import sqlite3
@@ -14,7 +20,8 @@ import time
 # имя файла БД (в .gitignore через маску *.db)
 DB_PATH: str = "seen.db"
 
-# окно cross-chat-дедупа: тот же текст того же автора за 30 минут — дубль
+# окно cross-chat-дедупа: тот же канонический отпечаток за это время
+# (любой канал/автор) — дубль. Тюнимый параметр (подбор на живом потоке).
 CROSS_CHAT_WINDOW_SECONDS: int = 30 * 60
 
 
@@ -56,7 +63,9 @@ def init(conn: sqlite3.Connection) -> None:
 
 
 # -------------------------
-# IS_DUPLICATE — два уровня: точный (chat+msg) и cross-chat (fingerprint+автор/30мин)
+# IS_DUPLICATE — два уровня: точный (chat+msg) и cross-chat (fingerprint/окно).
+# author_id в сигнатуре сохранён ради совместимости вызова из collector,
+# но в проверке v2 НЕ участвует (см. уровень 2 ниже).
 # -------------------------
 def is_duplicate(
     conn: sqlite3.Connection,
@@ -75,20 +84,21 @@ def is_duplicate(
     if cur.fetchone() is not None:
         return True
 
-    # 2) cross-chat: тот же текст того же автора за последние 30 минут.
-    #    NULL-автора сравниваем явно (правка П2): на голом sqlite3
-    #    `author_id = NULL` всегда ложь, поэтому дедуп №2 для постов
-    #    «от имени канала» (автор None, Г6) без этого тихо течёт.
+    # 2) cross-chat: тот же канонический отпечаток за последние
+    #    CROSS_CHAT_WINDOW_SECONDS, НЕЗАВИСИМО от канала и автора.
+    #    v2: убрали условие по author_id — один заказ постят разные боты
+    #    в разные каналы, авторы не совпадают (диагноз — спека v2 §1.2).
+    #    Канонический fingerprint (fingerprint.py) уже одинаков для одного
+    #    заказа из любого канала, поэтому автор больше не нужен.
     threshold = _now() - CROSS_CHAT_WINDOW_SECONDS
     cur.execute(
         """
         SELECT 1 FROM seen
         WHERE fingerprint = ?
-          AND (author_id = ? OR (? IS NULL AND author_id IS NULL))
           AND created_at >= ?
         LIMIT 1
         """,
-        (fingerprint, author_id, author_id, threshold),
+        (fingerprint, threshold),
     )
 
     return cur.fetchone() is not None
