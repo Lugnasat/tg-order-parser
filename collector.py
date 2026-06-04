@@ -93,9 +93,13 @@ def process_message(
     if category is None:
         return None
 
-    # дубль (оба уровня) -> skip
+    # дубль (оба уровня) -> skip. ДИАГ-лог (v2, период наблюдения): пишем
+    # срабатывание дедупа в journald — иначе «событие без отправки»
+    # неотличимо от отсева по фильтру/минус-слову. fp режем до 8 символов
+    # (для глаза хватает сопоставить дубли). После наблюдения строку можно убрать.
     fp = fingerprint(text)
     if db.is_duplicate(conn, fp, chat_id, message_id, author_id):
+        logger.info("дубль срезан: чат %s msg %s (fp %s)", chat_id, message_id, fp[:8])
         return None
 
     # собрать ссылку и готовый текст
