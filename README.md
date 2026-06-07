@@ -35,6 +35,9 @@ Telethon (твой аккаунт) -> слушает SOURCE_CHATS
    | `TELEGRAM_SESSION` | строка user-сессии | генерится `generate_session.py` (см. ниже) |
    | `BOT_TOKEN` | токен бота-отправителя | @BotFather |
    | `MY_TELEGRAM_ID` | куда слать заказы (id или группа) | @userinfobot |
+   | `SOURCE_CHATS` | чаты-источники (marked-id `-100…`, через запятую) | id видно в логах при первом запуске |
+   | `SITE_PUSH_URL` | *(опц.)* URL приёма витрины на сайте | `https://фотовьетнам.рф/wp-json/dm/v1/feed` |
+   | `SITE_PUSH_TOKEN` | *(опц.)* общий токен пуша | тот же, что `DM_FEED_TOKEN` в `wp-config.php` сайта |
 
 2. Сгенерируй сессию (разово, интерактивно — спросит телефон + код + 2FA):
    ```
@@ -54,9 +57,9 @@ python main.py
 
 ## Как настраивать фильтр
 
-- **Добавить/убрать чат-источник** — список `SOURCE_CHATS` в `config.py`
-  (marked-id вида `-100…`). Если аккаунт не состоит в чате — он сам
-  отсеется на старте с предупреждением в логе.
+- **Добавить/убрать чат-источник** — список `SOURCE_CHATS` в `.env`
+  (marked-id вида `-100…`, через запятую). Если аккаунт не состоит в
+  чате — он сам отсеется на старте с предупреждением в логе.
 - **Добавить ключевик** — словарь `KEYWORDS` в `keywords.py`. Принцип:
   фразы по намерению заказа, не голые слова (голое слово ловит boilerplate).
   Маркер `*` в конце = префиксный матч словоформ (только на одиночных словах).
@@ -88,5 +91,69 @@ python main.py
 
 > **Одна сессия — один процесс.** Не запускай парсер на сервере и локально
 > одновременно с одной и той же `TELEGRAM_SESSION` — Telegram отзовёт ключ.
+
+## Экспорт витрины на сайт (модуль `exporter`)
+
+Отдельный модуль: раз в ~7 мин пушит на портфолио-сайт `фотовьетнам.рф`
+**обезличенную** сводку — живую ленту последних заявок + почасовой график.
+Парсинг/фильтрацию НЕ трогает, только читает агрегаты из той же SQLite.
+
+```
+exporter.py -> читает БД (showcase + почасовые из seen)
+   -> build_payload(): updated · leads[ts,category,snippet] · counts_hourly[t,n]
+   -> POST на SITE_PUSH_URL, заголовок Authorization: Bearer SITE_PUSH_TOKEN
+```
+
+**Закон «0 утечек».** Сниппеты обезличиваются `anonymize()` (`anonymize.py`)
+**на записи** в таблицу `showcase` (в `collector.py`, после отправки заказа) —
+в БД оседает уже чистый текст: ни контактов, ни @ников, ни ссылок, ни
+названий площадок. Регресс-тест на реальных заявках:
+
+```
+python anonymize_check.py     # все кейсы должны быть OK (это стоп-линия)
+```
+
+**Сухой прогон** (собрать payload и напечатать, без сети):
+
+```
+python exporter.py --dry
+```
+
+**Боевой пуш** (нужны `SITE_PUSH_URL` + `SITE_PUSH_TOKEN` в `.env`):
+
+```
+python exporter.py
+```
+Сайт недоступен/таймаут или неверный токен (401) — не падаем, пишем в лог,
+тик восполнит следующий запуск (push «в одну сторону», без ретрай-очереди).
+
+### Запуск по расписанию (systemd timer)
+
+Парсер (`main.py`) крутится постоянно, а `exporter.py` — разовый прогон по
+таймеру. Рядом с сервисом парсера заводим пару `*.service` + `*.timer`:
+
+```ini
+# /etc/systemd/system/lead-exporter.service  (Type=oneshot)
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/freelance-lead-parser
+EnvironmentFile=/opt/freelance-lead-parser/.env
+ExecStart=/opt/freelance-lead-parser/.venv/bin/python exporter.py
+```
+```ini
+# /etc/systemd/system/lead-exporter.timer
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=7min
+[Install]
+WantedBy=timers.target
+```
+```
+sudo systemctl daemon-reload
+sudo systemctl enable --now lead-exporter.timer
+sudo journalctl -u lead-exporter -f   # смотреть пуши
+```
+
+Альтернатива — cron: `*/7 * * * * cd /opt/freelance-lead-parser && .venv/bin/python exporter.py`.
 
 План реализации: [plans/2026-05-31-mvp-freelance-lead-parser.md](plans/2026-05-31-mvp-freelance-lead-parser.md)

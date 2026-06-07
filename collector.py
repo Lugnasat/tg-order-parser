@@ -31,6 +31,7 @@ from matching import has_minus, extract_category
 from fingerprint import fingerprint
 from link import build_link
 from formatter import format_message
+from anonymize import anonymize
 
 logger = logging.getLogger("collector")
 
@@ -168,6 +169,11 @@ async def run(conn) -> None:
 
                 # помечаем seen ТОЛЬКО после успешной отправки (защита от потери)
                 db.mark_seen(conn, fingerprint(text), chat_id, message_id, author_id)
+
+                # витрина: пишем ОБЕЗЛИЧЕННЫЙ сниппет для ленты на сайте.
+                # anonymize() режет контакты/ники/ссылки/хвосты площадок —
+                # в БД оседает уже чистый текст (закон «0 утечек», спека §8).
+                db.record_showcase(conn, extract_category(text), anonymize(text))
 
                 logger.info("заказ отправлен: чат %s msg %s", chat_id, message_id)
 

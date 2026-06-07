@@ -53,3 +53,14 @@ SOURCE_CHATS: list[int] = [
     for chat_id in _required("SOURCE_CHATS").split(",")
     if chat_id.strip()
 ]
+
+
+# -------------------------
+# ЭКСПОРТ НА САЙТ (модуль витрины) — ОПЦИОНАЛЬНЫЕ настройки.
+# Намеренно через os.environ.get (не _required): парсер должен подниматься и
+# БЕЗ них (экспорт — отдельный процесс по таймеру). Непустоту проверяет сам
+# exporter.py перед пушем. Токен общий с сайтом (там — DM_FEED_TOKEN в
+# wp-config); в клиентский JS он не попадает никогда (спека §5).
+# -------------------------
+SITE_PUSH_URL: str = os.environ.get("SITE_PUSH_URL", "")
+SITE_PUSH_TOKEN: str = os.environ.get("SITE_PUSH_TOKEN", "")

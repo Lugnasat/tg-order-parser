@@ -24,6 +24,10 @@ DB_PATH: str = "seen.db"
 # (любой канал/автор) — дубль. Тюнимый параметр (подбор на живом потоке).
 CROSS_CHAT_WINDOW_SECONDS: int = 30 * 60
 
+# витрина (модуль экспорта на сайт): сколько держим обезличенные сниппеты.
+# Спека §7 — не показываем заявки старше суток; чистим при каждой записи.
+SHOWCASE_TTL_SECONDS: int = 24 * 60 * 60
+
 
 # -------------------------
 # NOW — текущее время в unix-epoch UTC (правка П11)
@@ -58,6 +62,20 @@ def init(conn: sqlite3.Connection) -> None:
     # точный дедуп — по (chat_id, message_id); cross-chat — по fingerprint
     conn.execute("CREATE INDEX IF NOT EXISTS idx_seen_chat_msg ON seen (chat_id, message_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_seen_fingerprint ON seen (fingerprint)")
+
+    # витрина: обезличенные сниппеты для ленты на сайте. Отдельная таблица —
+    # схему seen (дедуп) НЕ трогаем. В snippet кладём УЖЕ очищенный текст
+    # (anonymize на стороне collector) — сырой PII в БД не оседает.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS showcase (
+            created_at INTEGER NOT NULL,
+            category   TEXT,
+            snippet    TEXT    NOT NULL
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_showcase_created ON showcase (created_at)")
 
     conn.commit()
 
@@ -127,3 +145,78 @@ def mark_seen(
         (fingerprint, chat_id, message_id, author_id, created_at),
     )
     conn.commit()
+
+
+# -------------------------
+# RECORD_SHOWCASE — записать обезличенный сниппет для витрины + чистка старья.
+# snippet ДОЛЖЕН быть уже прогнан через anonymize() (закон «0 утечек»);
+# пустой сниппет (вырезали всё) не пишем — на ленте ему делать нечего.
+# created_at оставлен параметром ради тестов (по умолчанию = сейчас).
+# -------------------------
+def record_showcase(
+    conn: sqlite3.Connection,
+    category: str | None,
+    snippet: str,
+    created_at: int | None = None,
+) -> None:
+    if not snippet or not snippet.strip():
+        return
+
+    if created_at is None:
+        created_at = _now()
+
+    conn.execute(
+        "INSERT INTO showcase (created_at, category, snippet) VALUES (?, ?, ?)",
+        (created_at, category, snippet),
+    )
+
+    # чистим записи старше суток (спека §7) — таблица не растёт без предела
+    conn.execute(
+        "DELETE FROM showcase WHERE created_at < ?",
+        (_now() - SHOWCASE_TTL_SECONDS,),
+    )
+    conn.commit()
+
+
+# -------------------------
+# RECENT_SHOWCASE — последние N сниппетов для ленты (свежие первыми).
+# Возвращает «сырьё» (epoch, категория, сниппет); сборку контракта payload
+# (ISO-дата, человекочитаемая категория) делает exporter.
+# -------------------------
+def recent_showcase(
+    conn: sqlite3.Connection,
+    limit: int = 8,
+) -> list[tuple[int, str | None, str]]:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT created_at, category, snippet FROM showcase "
+        "ORDER BY created_at DESC LIMIT ?",
+        (limit,),
+    )
+    return cur.fetchall()
+
+
+# -------------------------
+# HOURLY_COUNTS — почасовые счётчики пойманных заказов за последние `hours`.
+# Источник — seen.created_at (строка seen = один отправленный релевантный
+# заказ). Возвращаем РОВНО `hours` точек (старые → свежие), пустые часы = 0
+# (спека §7: пустой период -> нули). Каждая точка — (epoch начала часа, n).
+# -------------------------
+def hourly_counts(
+    conn: sqlite3.Connection,
+    hours: int = 48,
+) -> list[tuple[int, int]]:
+    now = _now()
+    current_hour = now - (now % 3600)          # начало текущего часа (UTC)
+    start = current_hour - (hours - 1) * 3600  # начало самого старого окна
+
+    cur = conn.cursor()
+    cur.execute(
+        # (created_at/3600)*3600 — округление вниз к началу часа (целочисленно)
+        "SELECT (created_at / 3600) * 3600 AS h, COUNT(*) "
+        "FROM seen WHERE created_at >= ? GROUP BY h",
+        (start,),
+    )
+    by_hour = {h: n for h, n in cur.fetchall()}
+
+    return [(start + i * 3600, by_hour.get(start + i * 3600, 0)) for i in range(hours)]
